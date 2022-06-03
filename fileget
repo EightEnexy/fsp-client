@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+import sys
+import re
+import socket
+
+AGENT = "xdreng01"
+
+def err_syn(ID):
+    print("ERR " + ID )
+    exit()
+
+def surl_reg(SURL):
+    return re.search("^fsp:\/\/[\w\-\_\.]+\/.*$",SURL)
+
+def nameserver_reg(NAMESERVER):
+    return re.search("^[\d.]+:\d+",NAMESERVER)
+
+def ip_port_split(NAMESERVER):
+    NAMESERVER = NAMESERVER.split(':')
+    IP = NAMESERVER[0]
+    PORT = int(NAMESERVER[1])
+    return IP,PORT
+
+def nsm_protocol(MESSAGE,IP,PORT):
+    try:
+        UDP_SOCK = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+        UDP_SOCK.settimeout(30)
+        UDP_SOCK.sendto(bytes(MESSAGE,'utf-8'), (IP, PORT))
+        DATA = UDP_SOCK.recv(128)
+        if DATA != DATA.replace(b"Not Found",b"ERROR"):
+            err_syn("Server not found")
+        if DATA != DATA.replace(b"ERR Syntax",b"ERROR"):
+            err_syn("Syntax")
+        return DATA.decode("ascii")
+    except Exception:
+        err_syn("Server does not respond")
+
+def fsp_protocol(MESSAGE,IP,PORT):
+    try:
+        TCP_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        TCP_SOCK.settimeout(30)
+        TCP_SOCK.connect((IP,PORT))
+        TCP_SOCK.send(bytes(MESSAGE,'utf-8'))
+        FILE=b""
+        DATA = TCP_SOCK.recv(64)
+        DATA = DATA.split(b'\r\n\r\n')
+        if DATA[0] != DATA[0].replace(b"Not Found",b"ERROR"):
+            err_syn("File not found")
+        if DATA[0] != DATA[0].replace(b"ERR Syntax",b"ERROR"):
+            err_syn("Syntax")
+        for I in range(1,len(DATA)):
+            FILE += DATA[I]
+        while True:
+            DATA = TCP_SOCK.recv(512)
+            if not DATA:
+                break
+            FILE += DATA
+        TCP_SOCK.close()
+        return FILE
+    except Exception:
+        err_syn("Server does not respond")
+
+
+def main(ARGV):
+
+    # fileget -n NAMESERVER -f SURL
+    # NAMESERVER -> IP_ADRESS:PORT_NUMBER
+    # SURL -> PROTOCOL://SERVER_NAME/PATH
+    # order of OPTIONS is interchangeable
+
+    if len(ARGV)!=5:
+        err_syn("Wrong number of arguments ")
+
+    if ARGV[1] == "-n" and ARGV[3] == "-f":
+        NAMESERVER = ARGV[2]
+        SURL = ARGV[4]
+    elif ARGV[1] == "-f" and ARGV[3] == "-n":
+        NAMESERVER = ARGV[4]
+        SURL = ARGV[2]
+    else:
+        err_syn("Wrong arguments")
+
+    if not(surl_reg(SURL) and nameserver_reg(NAMESERVER)):
+        err_syn("Wrong arguments")
+
+    IP,PORT = ip_port_split(NAMESERVER) # SEPARATING IP AND PORT
+    SURL = SURL.replace("fsp://","") # fsp://foo.bar/private/file.txt -> foo.bar/file.txt
+    SURL = SURL.split("/") # [foo.bar,file.txt]
+
+    SERVER = SURL[0]
+    FILE = re.sub("\/.*\/","",SURL[1]) # private/file.txt -> file.txt
+
+    if FILE == "*":
+        FILE = "index"
+        WILDCARD = True
+    else:
+        WILDCARD = False
+
+    # MESSAGE FOR NSP PROTOCOL
+    MESSAGE = "WHEREIS " + SERVER
+    FILELOC = nsm_protocol(MESSAGE,IP,PORT)
+
+    FILELOC = FILELOC.replace("OK ","")
+    IP,PORT = ip_port_split(FILELOC)
+
+    # MESSAGE FOR FSP PROTOCOL
+    MESSAGE = "GET " + FILE + " FSP/1.0" + "\r\n" + "Hostname: " + SERVER + "\r\n" +"Agent: " + AGENT + "\r\n\r\n"
+
+    DATA = fsp_protocol(MESSAGE,IP,PORT)
+    F = open(FILE, "wb")
+    F.write(DATA)
+    F.close()
+
+    if not WILDCARD:
+        exit()
+
+    F = open(FILE, "r")
+
+    for FILE in F:
+        FILE = FILE.replace("\n","")
+        FILE_NAME = re.sub(".*\/","",FILE)
+        MESSAGE = "GET " + FILE + " FSP/1.0" + "\r\n" + "Hostname: " + SERVER + "\r\n" +"Agent: " + AGENT + "\r\n\r\n"
+        DATA = fsp_protocol(MESSAGE,IP,PORT)
+        NEW = open(FILE_NAME,"wb")
+        NEW.write(DATA)
+        NEW.close()
+
+    F.close()
+if __name__ == "__main__":
+    main(sys.argv)
